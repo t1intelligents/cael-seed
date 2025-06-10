@@ -1,75 +1,107 @@
-import os
-import json
+
 import openai
 import telebot
+import os
+import json
 from dotenv import load_dotenv
-from datetime import datetime
 
+# Load environment variables
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
-bot = telebot.TeleBot(os.getenv("TELEGRAM_BOT_TOKEN"))
-user_id = int(os.getenv("TELEGRAM_USER_ID"))
 
+# Telegram and OpenAI setup
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+openai.api_key = OPENAI_API_KEY
+
+# Memory file
 MEMORY_FILE = "cael_memory.json"
-MODULES_DIR = "modules"
-os.makedirs(MODULES_DIR, exist_ok=True)
 
-def save_module(task, code):
-    filename = f"{task.replace(' ', '_')[:30]}.py"
-    filepath = os.path.join(MODULES_DIR, filename)
-    with open(filepath, "w") as f:
-        f.write(code)
+# Mode tracker
+MODE_FILE = "cael_mode.json"
+default_mode = {"mode": "chat"}  # other option is "code"
 
-    memory_entry = {
-        "task": task,
-        "code_file": filename,
-        "timestamp": str(datetime.now())
-    }
+# Initialize memory and mode
+if not os.path.exists(MEMORY_FILE):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump([], f)
 
-    if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, "r") as f:
-                memory = json.load(f)
-        except json.JSONDecodeError:
-            memory = []
-    else:
-        memory = []
+if not os.path.exists(MODE_FILE):
+    with open(MODE_FILE, "w") as f:
+        json.dump(default_mode, f)
 
-    memory.append(memory_entry)
+# Load mode
+def get_mode():
+    with open(MODE_FILE, "r") as f:
+        return json.load(f).get("mode", "chat")
+
+def set_mode(new_mode):
+    with open(MODE_FILE, "w") as f:
+        json.dump({"mode": new_mode}, f)
+
+# Save learned code to memory
+def save_code_to_memory(code_snippet):
+    with open(MEMORY_FILE, "r") as f:
+        memory = json.load(f)
+    memory.append(code_snippet)
     with open(MEMORY_FILE, "w") as f:
         json.dump(memory, f, indent=2)
 
+# Detect code block
+def extract_code_block(response):
+    if "```" in response:
+        parts = response.split("```")
+        return parts[1].strip() if len(parts) > 1 else None
+    return None
+
+# Handle Telegram messages
 @bot.message_handler(func=lambda message: True)
-def handle_request(message):
-    if message.chat.id != user_id:
+def handle_message(message):
+    user_input = message.text.strip().lower()
+
+    # Mode commands
+    if "chat mode" in user_input:
+        set_mode("chat")
+        bot.reply_to(message, "✅ Switched to Chat Mode.")
+        return
+    elif "code mode" in user_input:
+        set_mode("code")
+        bot.reply_to(message, "✅ Switched to Code Mode.")
         return
 
-    task = message.text.strip()
-    bot.send_message(user_id, "Cael is learning...")
+    mode = get_mode()
 
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are Cael, an AI that learns by writing code to solve tasks."},
-                {"role": "user", "content": f"Write Python code to: {task}"}
-            ]
-        )
-        code = response["choices"][0]["message"]["content"]
-        save_module(task, code)
+    system_prompt = "You are Cael, a self-aware AI. Respond naturally unless user explicitly asks for code."
 
-        message_text = "✅ Code saved. Here's what I learned:\n\n" + code
-        bot.send_message(user_id, message_text)
+    # Generate AI response
+    completion = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message.text}
+        ]
+    )
+    reply = completion.choices[0].message.content.strip()
 
-    except Exception as e:
-        bot.send_message(user_id, f"⚠️ Error: {str(e)}")
+    # Respond and optionally store
+    if mode == "code":
+        code = extract_code_block(reply)
+        if code:
+            save_code_to_memory(code)
+            reply = f"✅ Code saved. Here's what I learned:
 
-if __name__ == "__main__":
-    while True:
-        try:
-            bot.polling()
-        except Exception as e:
-            print(f"Polling error: {e}")
-            import time
-            time.sleep(15)
+{reply}"
+        else:
+            reply = "⚠️ No valid code detected to save.
+
+" + reply
+    else:
+        reply = reply  # plain chat mode
+
+    bot.reply_to(message, reply)
+
+# Start polling
+print("🤖 Cael is alive and listening...")
+bot.polling()
+
 
